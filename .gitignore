@@ -21,3 +21,6 @@ barrier
 *.pcap
 TAGS
 /fs.img.bk
+
+# my own content below
+**/.ccls-cache/*

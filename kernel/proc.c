@@ -301,6 +301,9 @@ kfork(void)
   np->state = RUNNABLE;
   release(&np->lock);
 
+  // copy sandbox mask from parent to child
+  np->sandbox_mask = p->sandbox_mask;
+
   return pid;
 }
 

@@ -110,3 +110,23 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// for sandbox
+uint64
+sys_interpose(void)
+{
+    uint32 mask;
+    char pathname[MAXPATH];
+
+    argint(0, (int*)&mask);
+    if (argstr(1, pathname, MAXPATH) < 0) {
+        return -1;
+    }
+
+    // update struct proc
+    struct proc* p = myproc();
+    p->sandbox_mask = mask;
+    safestrcpy(p->sandbox_pathname, pathname, MAXPATH);
+
+    return 0;
+}
