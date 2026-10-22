@@ -211,8 +211,14 @@ ialloc(uint dev, short type)
       memset(dip, 0, sizeof(*dip));
       dip->type = type;
       log_write(bp); // mark it allocated on the disk
+      struct inode *ip = iget(dev, inum);
+      if (ip == 0) {
+        // The inode cache is full. Undo the on-disk allocation.
+        dip->type = 0;
+        log_write(bp);
+      }
       brelse(bp);
-      return iget(dev, inum);
+      return ip;
     }
     brelse(bp);
   }
@@ -265,8 +271,10 @@ iget(uint dev, uint inum)
   }
 
   // Recycle an inode entry.
-  if (empty == 0)
-    panic("iget: no inodes");
+  if (empty == 0) {
+    release(&itable.lock);
+    return 0;
+  }
 
   ip = empty;
   ip->dev = dev;
@@ -697,6 +705,9 @@ namex(char *path, int nameiparent, char *name)
     ip = iget(ROOTDEV, ROOTINO);
   else
     ip = idup(myproc()->cwd);
+
+  if (ip == 0)
+    return 0;
 
   while ((path = skipelem(path, name)) != 0) {
     ilock(ip);

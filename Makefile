@@ -205,6 +205,7 @@ UPROGS=\
 	$U/_sync\
     $U/_sandbox\
     $U/_sbtest\
+	$U/_inode_exploit\
 
 
 
