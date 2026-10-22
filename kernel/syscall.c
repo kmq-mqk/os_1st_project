@@ -143,8 +143,21 @@ syscall(void)
 
   num = p->trapframe->a7;
   if ((1 << num) & p->sandbox_mask) {
-      p->trapframe->a0 = -1;    // error code
-      return;
+      int is_allowed = 0;
+      
+      if ((num == SYS_exec || num == SYS_open)) {
+        char pathname[MAXPATH];
+        if (argstr(0, pathname, MAXPATH) >= 0) { // pathname is in a0, if pathname exists, go on
+          if (strncmp(pathname, p->sandbox_pathname, MAXPATH) == 0) { // if pathname is allowed
+            is_allowed = 1;
+          }
+        }
+      }
+
+      if (!is_allowed) {
+        p->trapframe->a0 = -1;    // error code
+        return;
+      }
   }
   if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     // Use num to lookup the system call function for num, call it,
