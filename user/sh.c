@@ -3,6 +3,8 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/stat.h"
+#include "kernel/fs.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -12,6 +14,243 @@
 #define BACK  5
 
 #define MAXARGS 10
+
+#define MAXLINE  100
+#define MAXHIST  16
+#define MAXMATCH 64
+
+static char hist[MAXHIST][MAXLINE];
+static int  hcount;
+static int  interactive;
+
+static void
+addhistory(char *line)
+{
+  char *p;
+
+  for(p = line; *p == ' ' || *p == '\t'; p++)
+    ;
+  if(*p == 0)
+    return;
+  strcpy(hist[hcount % MAXHIST], line);
+  hcount++;
+}
+
+static void
+printhist(void)
+{
+  int k, first = hcount > MAXHIST ? hcount - MAXHIST : 0;
+
+  for(k = first; k < hcount; k++)
+    printf("%d %s\n", k + 1, hist[k % MAXHIST]);
+}
+
+static int
+expand_history(char *buf)
+{
+  int k = 0;
+  char *p;
+
+  if(buf[1] == '!' && buf[2] == 0){
+    if(hcount == 0){
+      fprintf(2, "!!: event not found\n");
+      return -1;
+    }
+    k = hcount - 1;
+  } else if(buf[1] >= '0' && buf[1] <= '9'){
+    for(p = buf + 1; *p >= '0' && *p <= '9'; p++){
+      k = k * 10 + (*p - '0');
+      if(k > 100000)
+        break;
+    }
+    if(*p != 0)
+      return 0;
+    k--;
+    if(k < 0 || k >= hcount || k < hcount - MAXHIST){
+      fprintf(2, "%s: event not found\n", buf);
+      return -1;
+    }
+  } else
+    return 0;
+
+  strcpy(buf, hist[k % MAXHIST]);
+  return 1;
+}
+
+static int
+startswith(char *s, char *prefix)
+{
+  while(*prefix){
+    if(*s++ != *prefix++)
+      return 0;
+  }
+  return 1;
+}
+
+static int
+findmatches(char *dir, char *base, char names[][DIRSIZ+1], int max)
+{
+  int fd, n = 0;
+  struct dirent de;
+
+  if((fd = open(dir, O_RDONLY)) < 0)
+    return 0;
+  while(n < max && read(fd, &de, sizeof(de)) == sizeof(de)){
+    if(de.inum == 0)
+      continue;
+    memmove(names[n], de.name, DIRSIZ);
+    names[n][DIRSIZ] = 0;
+    if(strcmp(names[n], ".") == 0 || strcmp(names[n], "..") == 0)
+      continue;
+    if(!startswith(names[n], base))
+      continue;
+    n++;
+  }
+  close(fd);
+  return n;
+}
+
+static int
+complete(char *buf, int len)
+{
+  char names[MAXMATCH][DIRSIZ+1];
+  char dir[MAXLINE];
+  char tail[DIRSIZ+2];
+  char *word, *base;
+  int ws, i, n, first, slash;
+
+  buf[len] = 0;
+
+  ws = len;
+  while(ws > 0 && buf[ws-1] != ' ' && buf[ws-1] != '\t')
+    ws--;
+  word = buf + ws;
+
+  first = 1;
+  for(i = 0; i < ws; i++)
+    if(buf[i] != ' ' && buf[i] != '\t')
+      first = 0;
+
+  slash = -1;
+  for(i = 0; word[i]; i++)
+    if(word[i] == '/')
+      slash = i;
+  if(slash >= 0){
+    if(slash == 0){
+      strcpy(dir, "/");
+    } else {
+      memmove(dir, word, slash);
+      dir[slash] = 0;
+    }
+    base = word + slash + 1;
+  } else {
+    strcpy(dir, first ? "/" : ".");
+    base = word;
+  }
+
+  n = findmatches(dir, base, names, MAXMATCH);
+  if(n == 0)
+    return len;
+
+  if(n == 1){
+    strcpy(tail, names[0] + strlen(base));
+    if(first)
+      strcpy(tail + strlen(tail), " ");
+    if(len + strlen(tail) >= MAXLINE - 1)
+      return len;
+    strcpy(buf + len, tail);
+    write(2, tail, strlen(tail));
+    return len + strlen(tail);
+  }
+
+  write(2, "\n", 1);
+  for(i = 0; i < n; i++)
+    fprintf(2, "%s%s", i ? " " : "", names[i]);
+  fprintf(2, "\n$ %s", buf);
+  return len;
+}
+
+static int
+replaceline(char *buf, int len, char *s)
+{
+  int i;
+
+  for(i = 0; i < len; i++)
+    write(2, "\b \b", 3);
+  strcpy(buf, s);
+  len = strlen(buf);
+  write(2, buf, len);
+  return len;
+}
+
+static int
+readline(char *buf, int nbuf)
+{
+  char saved[MAXLINE];
+  char c, c1, c2;
+  int len = 0, idx = hcount, first, r, pending, quiet;
+
+  memset(buf, 0, nbuf);
+  saved[0] = 0;
+  pending = consraw(1);
+  write(2, "$ ", 2);
+
+  for(;;){
+    r = read(0, &c, 1);
+    if(r < 0 || (r == 0 && len == 0)){
+      consraw(0);
+      return -1;
+    }
+    if(r == 0)
+      continue;
+
+    quiet = pending > 0;
+    if(quiet)
+      pending--;
+
+    if(c == '\n' || c == '\r'){
+      if(!quiet)
+        write(2, "\n", 1);
+      break;
+    } else if(quiet){
+      if(c >= ' ' && c < 127 && len < nbuf - 1)
+        buf[len++] = c;
+    } else if(c == 127 || c == '\b'){
+      if(len > 0){
+        buf[--len] = 0;
+        write(2, "\b \b", 3);
+      }
+    } else if(c == 21){
+      len = replaceline(buf, len, "");
+    } else if(c == '\t'){
+      len = complete(buf, len);
+    } else if(c == 27){
+      if(read(0, &c1, 1) != 1 || read(0, &c2, 1) != 1)
+        continue;
+      if(c1 != '[' && c1 != 'O')
+        continue;
+      first = hcount > MAXHIST ? hcount - MAXHIST : 0;
+      if(c2 == 'A' && idx > first){
+        if(idx == hcount)
+          strcpy(saved, buf);
+        idx--;
+        len = replaceline(buf, len, hist[idx % MAXHIST]);
+      } else if(c2 == 'B' && idx < hcount){
+        idx++;
+        len = replaceline(buf, len, idx == hcount ? saved : hist[idx % MAXHIST]);
+      }
+    } else if(c >= ' ' && c < 127){
+      if(len < nbuf - 1){
+        buf[len++] = c;
+        write(2, &c, 1);
+      }
+    }
+  }
+
+  consraw(0);
+  buf[len] = 0;
+  return 0;
+}
 
 struct cmd {
   int type;
@@ -76,6 +315,10 @@ runcmd(struct cmd *cmd)
     ecmd = (struct execcmd *)cmd;
     if (ecmd->argv[0] == 0)
       exit(1);
+    if (strcmp(ecmd->argv[0], "history") == 0) {
+      printhist();
+      exit(0);
+    }
     exec(ecmd->argv[0], ecmd->argv);
     fprintf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
@@ -134,45 +377,60 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  write(2, "$ ", 2);
+  int n;
+
+  if(interactive)
+    return readline(buf, nbuf);
+
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
-  if (buf[0] == 0) // EOF
+  if(buf[0] == 0)
     return -1;
+  n = strlen(buf);
+  if(buf[n-1] == '\n')
+    buf[n-1] = 0;
   return 0;
 }
 
 int
 main(void)
 {
-  static char buf[100];
-  int fd;
+  static char buf[MAXLINE];
+  struct stat st;
+  int fd, r;
 
   // Ensure that three file descriptors are open.
-  while ((fd = open("console", O_RDWR)) >= 0) {
-    if (fd >= 3) {
+  while((fd = open("console", O_RDWR)) >= 0){
+    if(fd >= 3){
       close(fd);
       break;
     }
   }
 
+  interactive = (fstat(0, &st) == 0 && st.type == T_DEVICE);
+
   // Read and run input commands.
-  while (getcmd(buf, sizeof(buf)) >= 0) {
-    char *cmd = buf;
-    while (*cmd == ' ' || *cmd == '\t')
-      cmd++;
-    if (*cmd == '\n') // is a blank command
+  while(getcmd(buf, sizeof(buf)) >= 0){
+    if(buf[0] == 0)
       continue;
-    if (cmd[0] == 'c' && cmd[1] == 'd' && cmd[2] == ' ') {
-      // Chdir must be called by the parent, not the child.
-      cmd[strlen(cmd) - 1] = 0; // chop \n
-      if (chdir(cmd + 3) < 0)
-        fprintf(2, "cannot cd %s\n", cmd + 3);
-    } else {
-      if (fork1() == 0)
-        runcmd(parsecmd(cmd));
-      wait(0);
+
+    if(buf[0] == '!'){ 
+      r = expand_history(buf);
+      if(r < 0)
+        continue;
+      if(r > 0)
+        printf("%s\n", buf);
     }
+    addhistory(buf);
+
+    if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
+      if(chdir(buf+3) < 0)
+        fprintf(2, "cannot chdir %s\n", buf+3);
+      continue;
+    }
+    if(fork1() == 0)
+      runcmd(parsecmd(buf));
+    wait(0);
   }
   exit(0);
 }

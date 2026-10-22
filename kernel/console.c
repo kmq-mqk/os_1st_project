@@ -143,10 +143,22 @@ consoleread(int user_dst, uint64 dst, int n)
 // do erase/kill processing, append to cons.buf,
 // wake up consoleread() if a whole line has arrived.
 //
+
+static int rawmode = 0;
 void
 consoleintr(int c)
 {
   acquire(&cons.lock);
+
+  if(rawmode && c != C('P')){
+    if(cons.e - cons.r < INPUT_BUF_SIZE){
+      cons.buf[cons.e++ % INPUT_BUF_SIZE] = c;
+      cons.w = cons.e;
+      wakeup(&cons.r);
+    }
+    release(&cons.lock);
+    return;
+  }
 
   switch (c) {
   case C('P'): // Print process list.
@@ -187,6 +199,28 @@ consoleintr(int c)
   }
 
   release(&cons.lock);
+}
+
+int
+consoleraw(int on)
+{
+  int pending = 0;
+  uint i;
+
+  acquire(&cons.lock);
+  if(on){
+    pending = cons.e - cons.r;
+    cons.w = cons.e;
+  } else if(rawmode){
+    for(i = cons.r; i != cons.e; i++){
+      int c = cons.buf[i % INPUT_BUF_SIZE];
+      if(c == '\n' || (c >= ' ' && c < 127))
+        consputc(c);
+    }
+  }
+  rawmode = on;
+  release(&cons.lock);
+  return pending;
 }
 
 void
