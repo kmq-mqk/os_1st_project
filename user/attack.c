@@ -3,11 +3,7 @@
 #include "user/user.h"
 #include "kernel/riscv.h"
 
-#include "kernel/memlayout.h"
-
-#ifndef DATASIZE
-  #define DATASIZE (64 * PGSIZE)
-#endif
+#define SCANSIZE (64 * PGSIZE)
 
 #ifndef MSG
   #define MSG "Here it is: "
@@ -18,13 +14,13 @@ main(int argc, char *argv[])
 {
   int msglen = strlen(MSG);
 
-  char *data = sbrk(DATASIZE);
+  char *data = sbrk(SCANSIZE);
   if (data == SBRK_ERROR) {
     printf("sbrk() failed\n");
     exit(1);
   }
 
-  char *end = data + DATASIZE;
+  char *end = data + SCANSIZE;
   int matches = 0;
 
   for (char *p = data; p + msglen <= end; p++) {
